@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>8K Ultra Mandelbulb Heavy Benchmark</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #hud {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 12px 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #fff;
+            pointer-events: none;
+            backdrop-filter: blur(5px);
+        }
+        .fps-title { font-size: 12px; color: #aaa; text-transform: uppercase; }
+        .fps-val { font-size: 36px; font-weight: bold; color: #00ffcc; }
+        .fps-low { color: #ff3333 !important; }
+        .status { font-size: 11px; color: #888; margin-top: 4px; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <div class="fps-title">GPU FPS Monitor</div>
+        <div id="fps" class="fps-val">60</div>
+        <div id="status" class="status">Ultra Quality 8K Raymarching...</div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <!-- Vertex Shader -->
+    <script id="vs" type="x-shader/x-vertex">
+        attribute vec2 position;
+        void main() {
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+    </script>
+
+    <!-- Fragment Shader: Extreme Realistic Mandelbulb with Original Colors -->
+    <script id="fs" type="x-shader/x-fragment">
+        precision highp float;
+
+        uniform vec2 u_resolution;
+        uniform float u_time;
+
+        #define MAX_STEPS 128
+        #define SURF_DIST 0.001
+        #define MAX_DIST 10.0
+        #define ITERATIONS 12
+        #define POWER 8.0
+
+        // Mandelbulb 3D Фрактал формуласы және түпнұсқа түстер
+        float map(vec3 pos, out vec4 outColor) {
+            vec3 z = pos;
+            float dr = 1.0;
+            float r = 0.0;
+            float trap = 1.0;
+            
+            for (int i = 0; i < ITERATIONS; i++) {
+                r = length(z);
+                if (r > 4.0) break;
+                
+                // Сфералық координаттарға айналдыру
+                float theta = acos(z.z / r);
+                float phi = atan(z.y, z.x);
+                dr = pow(r, POWER - 1.0) * POWER * dr + 1.0;
+                
+                // Масштабтау және айналдыру
+                float zr = pow(r, POWER);
+                theta = theta * POWER;
+                phi = phi * POWER;
+                
+                // Қайта 3D декартов жүйесіне қайтару
+                z = zr * vec3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+                z += pos;
+                
+                trap = min(trap, r);
+            }
+
+            // Суреттегідей жасыл, көк, қызғылт және сары түстердің үйлесімі (Original cznull palette)
+            vec3 col = vec3(
+                sin(trap * 3.0 + u_time * 0.2),
+                sin(trap * 4.0 + 1.0 + u_time * 0.2),
+                sin(trap * 5.0 + 2.0 + u_time * 0.2)
+            );
+            col = clamp(col * 0.5 + 0.5, 0.0, 1.0);
+            
+            // Қанықтығын арттыру
+            col = pow(col, vec3(0.8)) * vec3(1.2, 1.1, 1.3);
+
+            outColor = vec4(col, 1.0);
+
+            return 0.5 * log(r) * r / dr;
+        }
+
+        // Беткей нормалін есептеу (Шынайы көлеңке мен жарық үшін)
+        vec3 getNormal(vec3 p) {
+            vec4 dummy;
+            float d = map(p, dummy);
+            vec2 e = vec2(0.001, 0.0);
+            vec3 n = d - vec3(
+                map(p - e.xyy, dummy),
+                map(p - e.yxy, dummy),
+                map(p - e.yyx, dummy)
+            );
+            return normalize(n);
+        }
+
+        void main() {
+            // Экраны рендеринг (Супер сапа)
+            vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
+
+            // Камераның орналасуы және айналуы
+            float time = u_time * 0.2;
+            vec3 ro = vec3(2.5 * sin(time), 1.0 * cos(time * 0.5), 2.5 * cos(time));
+            vec3 ta = vec3(0.0, 0.0, 0.0);
+            
+            vec3 ww = normalize(ta - ro);
+            vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));
+            vec3 vv = normalize(cross(uu, ww));
+            
+            vec3 rd = normalize(uv.x * uu + uv.y * vv + 1.5 * ww);
+
+            // Raymarching (Сәуле жіберу - GPU-ға ең ауыр бөлім)
+            float dO = 0.0;
+            vec4 color = vec4(0.0);
+            vec4 objColor = vec4(0.0);
+
+            for (int i = 0; i < MAX_STEPS; i++) {
+                vec3 p = ro + rd * dO;
+                float dS = map(p, objColor);
+                dO += dS;
+                
+                if (dS < SURF_DIST) {
+                    vec3 n = getNormal(p);
+                    vec3 lightDir = normalize(vec3(1.0, 2.0, -1.0));
+                    
+                    // Realistic Ambient Occlusion + Diffuse Lighting
+                    float diff = max(dot(n, lightDir), 0.15);
+                    float ao = clamp(float(i) / float(MAX_STEPS), 0.0, 1.0);
+                    ao = 1.0 - ao;
+
+                    color = objColor * diff * (ao * 1.5);
+                    color += vec4(pow(max(dot(reflect(-lightDir, n), -rd), 0.0), 16.0)); // Specular highlight
+                    break;
+                }
+                
+                if (dO > MAX_DIST) break;
+            }
+
+            // Қара фон + Фрактал
+            gl_FragColor = vec4(color.rgb, 1.0);
+        }
+    </script>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+
+        if (!gl) {
+            alert('Браузер WebGL қолдамайды!');
+        }
+
+        // Жоғары пиксель сапасы (8K сапа симуляциясы)
+        function resize() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2.0); // Рендер тығыздығын максималды ету
+            canvas.width = window.innerWidth * dpr;
+            canvas.height = window.innerHeight * dpr;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        const vsSource = document.getElementById('vs').text;
+        const fsSource = document.getElementById('fs').text;
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        gl.useProgram(program);
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1,  1, -1, -1,  1,
+            -1,  1,  1, -1,  1,  1,
+        ]), gl.STATIC_DRAW);
+
+        const positionLocation = gl.getAttribLocation(program, "position");
+        gl.enableVertexAttribArray(positionLocation);
+        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+        const resLoc = gl.getUniformLocation(program, "u_resolution");
+        const timeLoc = gl.getUniformLocation(program, "u_time");
+
+        // FPS есептегіш
+        let lastTime = performance.now();
+        let frameCount = 0;
+        const fpsElem = document.getElementById('fps');
+
+        function render(now) {
+            frameCount++;
+            if (now - lastTime >= 1000) {
+                let fps = Math.round((frameCount * 1000) / (now - lastTime));
+                fpsElem.innerText = fps;
+                
+                if (fps <= 10) {
+                    fpsElem.classList.add('fps-low');
+                } else {
+                    fpsElem.classList.remove('fps-low');
+                }
+
+                frameCount = 0;
+                lastTime = now;
+            }
+
+            gl.uniform2f(resLoc, canvas.width, canvas.height);
+            gl.uniform1f(timeLoc, now * 0.001);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            requestAnimationFrame(render);
+        }
+
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
